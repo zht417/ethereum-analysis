@@ -1,0 +1,80 @@
+ethdb包分析
+
+文档结构
+1.说明
+2.LevelDB
+3.源码解析
+4.其他
+
+一、说明
+	ethdb包是ETH存储数据的工具包，目前支持的数据库为LevelDB,数据存储为K-V格式，一般key存储hash，value存储RLP编码后的数据结构，支持单项与批量插入（PUT）、查询(GET)、检验(HAS)、删除(DELETE)、监控(meter)等操作。
+	ethdb包源码目前包含四个文件：database.go、database_test.go、interface.go、memory_database.go
+	core/database_util.go是底层数据结构整理与配合ethdb入库、查询操作的基础方法类。
+
+二、LevelDB
+   1.说明
+        google实现的C/C++编程的非常高效的分层持久化kv单机数据库。
+   2.算法
+        LSM(Log Structured Merge),lsm_tree对索引变更进行延迟及批量处理，并通过一种类似于归并排序的方式高效地将更新迁移到磁盘，降低索引插入开销。
+   3.特点
+        a.单进程
+		b.key和value都是任意长度的字节数组。
+		c.entry（即一条K-V记录）默认是按照key的字典顺序存储的。
+		d.提供的基本操作接口：Put()、Delete()、Get()、Batch()。
+		e.支持批量操作以原子操作进行。
+		f.可以创建数据全景的snapshot(快照)，并允许在快照中查找数据。
+		g.可以通过前向（或后向）迭代器遍历数据(迭代器会隐含的创建一个snapshot)。
+		h.自动使用Snappy压缩数据。
+		i.可移植性。
+		j.高性能：随机读（完全命中内存）每秒超过10W数据。
+	4.局限
+	    a.无网络服务封装--无法通过客户端连接
+		b.非关系型数据模型（NoSQL），不支持sql语句，也不支持索引。
+		c.一次只允许一个进程访问一个特定的数据库。
+		d.没有内置的C/S架构，但开发者可以使用LevelDB库自己封装一个server。
+	5.构成
+	    a.MemTable-内存
+		b.Immutable MemTable-内存满员时，将文件改成该类型文件(只读)。
+		c.Current-当前指向Manifest文件。
+		d.Manifest-记载了SSTable各个文件的管理信息。
+		e.Log-用于系统崩溃恢复数据。
+		f.SSTable-按照特定层级分层存储文件。
+	6.写操作
+	    步骤：
+		    a.顺序写入磁盘log文件
+			b.写入内存memtable(采用skiplist结构实现)
+			c.写入磁盘SST文件(sorted string table files)，这步是数据归档的过程(永久化存储)
+		注意点：
+		    a.log文件的作用是是用于系统崩溃恢复而不丢失数据，假如没有Log文件，因为写入的记录刚开始是保存在内存中的，此时如果系统崩溃，内存中的数据还没有来得及Dump到磁盘，所以会丢失数据。
+			b.在写memtable时，如果其达到check point（满员）的话，会将其改成immutable memtable（只读），然后等待dump到磁盘SST文件中，此时也会生成新的memtable供写入新数据。
+			c.memtable和sst文件中的key都是有序的，log文件的key是无序的。
+			d.LevelDB删除操作也是插入，只是标记Key为删除状态，真正的删除要到Compaction的时候才去做真正的操作。
+			e.LevelDB没有更新接口，如果需要更新某个Key的值，只需要插入一条新纪录即可；或者先删除旧记录，再插入也可。
+	7.读操作
+	    步骤：
+		    a.在内存中依次查找memtable、immutable memtable。
+			b.如果配置了cache，查找cache。
+			c.根据mainfest索引文件，在磁盘中查找SST文件。
+
+三、源码分析
+	1.interface.go
+	   统一接口封装，包含数据库的单/批操作方法(putter,get,has,delete,close,batch)
+    2.database.go
+	   a.NewLDBDatabase()--初始化LevelDB实例,初始化数据库数据，文件缓存容量+块缓存容量+写缓存等
+	   b.Put()--保存数据，将数据放入levelDB存储队列
+	   c.Has()--校验key值在LevelDB中是否存在
+	   d.Get()--查询key对应的value值
+	   e.Delete()--删除key对应的数据
+	   f.NewIterator()--创建LevelDB数据遍历器
+	   g.Close()--数据库关闭操作
+	   h.Meter()--初始化特殊请求前缀，并启动监听程序
+	   i.NewBatch()--初始化批处理实例，后续提供了相关Put/ValueSize/Write等方法
+	   j.table/tableBatch--按照前缀操作单/批量数据的实例，后续提供了相关Put/Has/Get/Delete/Close等方法
+    3.database_test.go
+	   基于database.go对外提供的测试接口
+	4.memory_database.go
+	   使用内存变量模拟数据库单/批的并行操作
+
+四、其他
+    具体数据结构的组织与封装见core/database_util.go
+
